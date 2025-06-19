@@ -1,0 +1,28 @@
+# Environment variables
+# Local environment files
+config/source.env
+config/target.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE and OS files
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+# Ignore project-specific instance folders
+new-api/
+newapi-service/
+voapi_project_backup_20250619/
+
+# Ignore exported data
+exported_data/
+
+# Ignore local environment files
+config/source.env
+config/target.env

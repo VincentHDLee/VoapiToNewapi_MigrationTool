@@ -1,0 +1,136 @@
+# -----------------------------------------------------------------
+# 示例文件: 迁移前的 docker-compose.yml
+#
+# 这是您的 VoAPI 服务在迁移数据前的推荐状态。
+# 关键点是为 'mysql' 服务添加了端口映射，以便迁移脚本可以访问。
+# -----------------------------------------------------------------
+
+services:
+  voapi:
+    image: voapi/voapi:latest
+    container_name: voapi-app
+    restart: unless-stopped
+    command: --log-dir /app/logs
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./data:/data
+      - ./logs:/app/logs
+    environment:
+      - SQL_DSN=voapi_user:YOUR_VOAPI_USER_PASSWORD@tcp(mysql:3306)/voapi?charset=utf8mb4&parseTime=True&loc=Local
+      - REDIS_CONN_STRING=redis://:YOUR_REDIS_PASSWORD@redis:6379
+      - SESSION_SECRET=YOUR_VOAPI_SESSION_SECRET
+      - TZ=Asia/Tokyo
+      - GIN_MODE=release
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - voapi-net
+
+  mysql:
+    image: mysql:8.0
+    container_name: voapi-mysql
+    restart: unless-stopped
+    # --- !! 关键修改 !! ---
+    # 暴露数据库端口给主机，以便迁移脚本连接
+    ports:
+      - "33066:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=YOUR_MYSQL_ROOT_PASSWORD
+      - MYSQL_DATABASE=voapi
+      - MYSQL_USER=voapi_user
+      - MYSQL_PASSWORD=YOUR_VOAPI_USER_PASSWORD
+      - TZ=Asia/Tokyo
+    command: [--character-set-server=utf8mb4, --collation-server=utf8mb4_unicode_ci]
+    networks:
+      - voapi-net
+
+  mysql-backup:
+    image: tiredofit/db-backup
+    container_name: voapi-mysql-backup
+    restart: unless-stopped
+    environment:
+      - DB_TYPE=mysql
+      - DB_HOST=mysql
+      - DB_USER=root
+      - DB_PASS=YOUR_MYSQL_ROOT_PASSWORD
+      - DB_NAME=voapi
+      - BACKUP_TIME=03:00
+      - CLEANUP_TIME=168
+      - TIMEZONE=Asia/Tokyo
+      - COMPRESSION=gzip
+    volumes:
+      - ./backups:/backup
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - voapi-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: voapi-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    environment:
+      - TZ=Asia/Tokyo
+    command:
+      - redis-server
+      - --requirepass
+      - YOUR_REDIS_PASSWORD
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - allkeys-lru
+    networks:
+      - voapi-net
+
+  nginx:
+    image: nginx:latest
+    container_name: voapi-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+      - ./logs/nginx:/var/log/nginx
+      - ./static/images:/var/www/sucoiapi.com/static/images:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /var/www/certbot:/var/www/certbot:ro
+    environment:
+      - TZ=Asia/Tokyo
+    depends_on:
+      - voapi
+    networks:
+      - voapi-net
+
+  watchtower:
+    image: containrrr/watchtower
+    container_name: voapi-watchtower
+    restart: unless-stopped
+    environment:
+      - WATCHTOWER_SCHEDULE=0 0 4 * * *
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_INCLUDE_STOPPED=false
+      - TZ=Asia/Tokyo
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: ["--cleanup", "--debug", "voapi-app"]
+    networks:
+      - voapi-net
+
+volumes:
+  mysql_data:
+  redis_data:
+
+networks:
+  voapi-net:
+    driver: bridge
