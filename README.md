@@ -37,25 +37,21 @@
     └── ... (本工具的其他文件)
 ```
 
-**3. 准备 NewAPI 环境**
-
-您需要有一个正在运行的 NewAPI 实例，因为我们将要把数据迁移到它的数据库中。您可以选择：
-*   **已有 NewAPI 实例**：如果您已经有一个正在运行的 NewAPI，请确保您可以访问其 `docker-compose.yml` 文件和数据库。
-*   **全新部署 NewAPI**：如果您没有，请先按照 NewAPI 的官方文档部署一个新的实例。数据卷的位置在下一步中尤为重要。
-
 ### 阶段二：配置
 
-**1. 暴露数据库端口**
+**1. 准备统一的 docker-compose.yml**
 
-为了让迁移脚本能够连接到两个数据库，您需要分别修改 `voapi` 和 `newapi` 的 `docker-compose.yml` 文件，将它们的数据库端口映射到主机。
+为了简化操作，我们将所有服务统一管理在您 `voapi` 项目根目录的 `docker-compose.yml` 文件中。
 
-*   **对于 VoAPI**:
-    *   请参考本工具目录下的 `before-migration.compose.example.yml` 文件。它展示了如何在您的 `voapi` 的 `docker-compose.yml` 中为 `mysql` 服务添加 `ports` 映射 (`"33066:3306"`)。
-
-*   **对于 NewAPI**:
-    *   在您的 `newapi` 的 `docker-compose.yml` 中，为 `mysql` 服务进行类似修改，但使用**不同**的主机端口 (`"33067:3306"`) 以避免冲突。
-
-*   修改完成后，分别在两个项目目录中运行 `docker-compose up -d` 来应用更改。
+*   **备份现有 compose 文件**：
+    `cp docker-compose.yml docker-compose.backup.yml`
+*   **使用迁移前的模板**：
+    *   打开本工具目录下的 `before-migration.compose.example.yml`。它是一个包含了 VoAPI 和 NewAPI（已注释）的完整范本。
+    *   **复制**其内容，**覆盖**您现有的 `docker-compose.yml`。
+    *   **重要**：将范本中的所有占位符密码（如 `YOUR_MYSQL_ROOT_PASSWORD`）替换为您自己的实际密码。
+*   **启动数据库服务进行迁移**：
+    *   在 `voapi` 项目根目录下，运行 `docker-compose up -d`。
+    *   根据 `before-migration` 范本的设置，这将启动 `voapi` 的所有服务以及 `newapi` 的数据库服务，为数据迁移做好准备。
 
 **2. 配置环境变量**
 
@@ -85,16 +81,19 @@ python migration_scripts/02_transform_and_import_data.py
 
 ### 阶段四：服务切换
 
-这是实现平滑过渡的关键一步。您需要再次修改 **`voapi` 的 `docker-compose.yml`** 文件。
+这是实现平滑过渡的关键一步。
 
-**我们强烈建议您参考本工具目录下的 `after-migration.compose.example.yml` 文件。**
+**1. 切换 Compose 配置**
 
-它完整地展示了如何：
-1.  安全地注释掉旧的 `voapi` 服务。
-2.  添加并配置新的 `new-api` 服务。
-3.  更新 `nginx` 等依赖 `voapi` 的服务，使其转向 `new-api`。
+*   **参考 `after-migration.compose.example.yml`**：
+    *   打开本工具目录下的这个示例文件。它展示了迁移完成后的最终服务状态，其中旧的 `voapi` 服务被注释掉，新的 `new-api` 和所有相关的子服务（备份、监控等）都被激活并正确配置。
+    *   **复制**其内容，再次**覆盖**您现有的 `docker-compose.yml`。
+    *   同样，请确保将所有占位符密码替换为您的实际密码。
 
-请将 `after-migration.compose.example.yml` 的内容作为最终参考，来修改您自己的 `docker-compose.yml`。修改完成后，运行 `docker-compose up -d` 启动新服务。
+**2. 启动完整服务**
+
+*   在 `voapi` 项目根目录下，运行 `docker-compose up -d`。
+*   这将关闭旧的 `voapi` 服务，并启动新的 `new-api` 及其全套生态系统服务。
 
 ### 阶段五：验证
 

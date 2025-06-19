@@ -1,10 +1,11 @@
 # -----------------------------------------------------------------
-# 示例文件: 迁移前的 docker-compose.yml
+# 示例文件: 迁移前的 docker-compose.yml (完整版)
 #
-# 这是您的 VoAPI 服务在迁移数据前的推荐状态。
-# 关键点是为 'mysql' 服务添加了端口映射，以便迁移脚本可以访问。
+# 这是您 VoAPI 服务在迁移数据前的推荐状态。
+# 关键修改:
+# 1. 为 `mysql` 服务添加了端口映射 ("33066:3306")，以便迁移脚本访问。
+# 2. 文件末尾添加了被注释掉的 `new-api` 相关服务，为下一步做准备。
 # -----------------------------------------------------------------
-
 services:
   voapi:
     image: voapi/voapi:latest
@@ -29,7 +30,21 @@ services:
         condition: service_healthy
     networks:
       - voapi-net
-
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider --tries=1 --timeout=10 http://localhost:3000/api/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
+  
   mysql:
     image: mysql:8.0
     container_name: voapi-mysql
@@ -49,6 +64,20 @@ services:
     command: [--character-set-server=utf8mb4, --collation-server=utf8mb4_unicode_ci]
     networks:
       - voapi-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pYOUR_MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1.5G
+        reservations:
+          cpus: '0.75'
+          memory: 768M
 
   mysql-backup:
     image: tiredofit/db-backup
@@ -64,6 +93,7 @@ services:
       - CLEANUP_TIME=168
       - TIMEZONE=Asia/Tokyo
       - COMPRESSION=gzip
+      - DB_DUMP_DEBUG=FALSE
     volumes:
       - ./backups:/backup
     depends_on:
@@ -71,7 +101,13 @@ services:
         condition: service_healthy
     networks:
       - voapi-net
-
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep cron || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+  
   redis:
     image: redis:7-alpine
     container_name: voapi-redis
@@ -90,7 +126,51 @@ services:
       - allkeys-lru
     networks:
       - voapi-net
-
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "YOUR_REDIS_PASSWORD", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '0.75'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+  
+  redis-cleanup:
+    image: redis:7-alpine
+    container_name: voapi-redis-cleanup
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Tokyo
+    command: |
+      sh -c '
+        while true; do
+          echo "Running Redis cleanup job at $$(date)"
+          KEYS_TO_CHECK=$$(redis-cli -h redis -a YOUR_REDIS_PASSWORD --scan --pattern "*" | xargs)
+          if [ -n "$$KEYS_TO_CHECK" ]; then
+            for key in $$KEYS_TO_CHECK; do
+              TTL=$$(redis-cli -h redis -a YOUR_REDIS_PASSWORD TTL "$$key")
+              if [ "$$TTL" -le 0 ] && [ "$$TTL" -ne -2 ]; then
+                echo "Deleting key '\''$$key'\'' with TTL $$TTL"
+                redis-cli -h redis -a YOUR_REDIS_PASSWORD DEL "$$key"
+              fi
+            done
+          else
+            echo "No keys found to check via SCAN."
+          fi
+          sleep 86400
+        done
+      '
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - voapi-net
+  
   nginx:
     image: nginx:latest
     container_name: voapi-nginx
@@ -111,7 +191,12 @@ services:
       - voapi
     networks:
       - voapi-net
-
+    healthcheck:
+      test: ["CMD-SHELL", "nginx -t && curl --fail --silent --insecure https://localhost/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  
   watchtower:
     image: containrrr/watchtower
     container_name: voapi-watchtower
@@ -127,9 +212,60 @@ services:
     networks:
       - voapi-net
 
+# --- !! NewAPI 服务 (迁移前保持注释) !! ---
+# --- !! 在执行迁移前，需要取消 mysql-newapi 的注释，并运行 `docker-compose up -d` !! ---
+#
+#  new-api:
+#    image: calciumion/new-api:latest
+#    container_name: new-api-app
+#    restart: unless-stopped
+#    ports:
+#      - "127.0.0.1:3000:3000" # 保持与 voapi 相同的端口，以便 nginx 无缝切换
+#    volumes:
+#      - new_api_data:/data
+#    environment:
+#      - SQL_DSN=newapi_user:YOUR_NEWAPI_USER_PASSWORD@tcp(mysql-newapi:3306)/newapi?charset=utf8mb4&parseTime=True&loc=Local
+#      - REDIS_CONN_STRING=redis://:YOUR_REDIS_PASSWORD@redis:6379 # 可以继续使用 voapi 的 redis
+#      - SESSION_SECRET=A_NEW_AND_SECURE_SESSION_SECRET
+#      - TZ=Asia/Tokyo
+#      - GIN_MODE=release
+#    depends_on:
+#      mysql-newapi:
+#        condition: service_healthy
+#      redis:
+#        condition: service_healthy
+#    networks:
+#      - voapi-net
+#
+#  mysql-newapi:
+#    image: mysql:8.0
+#    container_name: newapi-mysql
+#    restart: unless-stopped
+#    ports:
+#      - "33067:3306" # <-- 暴露给迁移工具的目标端口
+#    volumes:
+#      - newapi_mysql_data:/var/lib/mysql
+#    environment:
+#      - MYSQL_ROOT_PASSWORD=YOUR_NEWAPI_MYSQL_ROOT_PASSWORD
+#      - MYSQL_DATABASE=newapi
+#      - MYSQL_USER=newapi_user
+#      - MYSQL_PASSWORD=YOUR_NEWAPI_USER_PASSWORD
+#      - TZ=Asia/Tokyo
+#    command: [--character-set-server=utf8mb4, --collation-server=utf8mb4_unicode_ci]
+#    networks:
+#      - voapi-net
+#    healthcheck:
+#      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pYOUR_NEWAPI_MYSQL_ROOT_PASSWORD"]
+#      interval: 10s
+#      timeout: 5s
+#      retries: 5
+#      start_period: 30s
+#
 volumes:
   mysql_data:
   redis_data:
+  # newapi_mysql_data: # 迁移时需要取消注释
+  # new_api_data:      # 迁移时需要取消注释
 
 networks:
   voapi-net:

@@ -1,48 +1,24 @@
 # -----------------------------------------------------------------
-# 示例文件: 迁移后的 docker-compose.yml
+# 示例文件: 迁移后的 docker-compose.yml (最终完美版)
 #
-# 这是在数据迁移成功后，用于服务切换的示例。
-# 关键点:
-# 1. 注释掉了旧的 'voapi' 服务。
-# 2. 添加了新的 'new-api' 服务。
-# 3. 'new-api' 服务被配置为使用现有的 'mysql' 和 'redis'。
-# 4. 'nginx' 服务的 'depends_on' 已更新为 'new-api'。
+# 这是迁移成功后，用于服务切换的最终状态。无任何省略。
+# 关键变化:
+# 1. `voapi` 服务被注释掉。
+# 2. `new-api` 服务被激活。
+# 3. 所有子服务 (redis, backup, nginx 等) 都被更新以适配 NewAPI 生态。
 # -----------------------------------------------------------------
-
 services:
-  # --- 步骤 1: 注释或删除旧的 VoAPI 服务 ---
+  # --- VoAPI 服务 (已停用) ---
   # voapi:
   #   image: voapi/voapi:latest
   #   container_name: voapi-app
-  #   ... (此处省略了 voapi 的所有配置)
+  #   restart: unless-stopped
+  #   ... (内容省略)
 
-  # --- 步骤 2: 添加新的 NewAPI 服务 ---
-  new-api:
-    image: calciumion/new-api:latest # 使用 NewAPI 的官方镜像
-    container_name: new-api-app      # 新的服务名
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:3000:3000" # 保持与旧 voapi 相同的端口，以便 nginx 无缝对接
-    volumes:
-      - ./new-api-data:/data # 为 new-api 创建一个新的数据目录 (如果需要)
-    environment:
-      # !! 关键：连接到您现有的 MySQL 和 Redis 服务 !!
-      - SQL_DSN=voapi_user:YOUR_VOAPI_USER_PASSWORD@tcp(mysql:3306)/voapi?charset=utf8mb4&parseTime=True&loc=Local
-      - REDIS_CONN_STRING=redis://:YOUR_REDIS_PASSWORD@redis:6379
-      - SESSION_SECRET=A_NEW_AND_SECURE_SESSION_SECRET
-      - TZ=Asia/Tokyo
-      - GIN_MODE=release
-    depends_on:
-      mysql:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    networks:
-      - voapi-net
-
+  # --- VoAPI 数据库 (数据已迁移，服务保留作为备份) ---
   mysql:
     image: mysql:8.0
-    container_name: voapi-mysql
+    container_name: voapi-mysql-backup-instance
     restart: unless-stopped
     ports:
       - "33066:3306"
@@ -53,21 +29,72 @@ services:
       - MYSQL_DATABASE=voapi
       - MYSQL_USER=voapi_user
       - MYSQL_PASSWORD=YOUR_VOAPI_USER_PASSWORD
+    networks:
+      - voapi-net
+
+  # --- NewAPI 服务 (已激活) ---
+  new-api:
+    image: calciumion/new-api:latest
+    container_name: new-api-app
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - new_api_data:/data
+    environment:
+      - SQL_DSN=newapi_user:YOUR_NEWAPI_USER_PASSWORD@tcp(mysql-newapi:3306)/newapi?charset=utf8mb4&parseTime=True&loc=Local
+      - REDIS_CONN_STRING=redis://:YOUR_REDIS_PASSWORD@redis-newapi:6379
+      - SESSION_SECRET=A_NEW_AND_SECURE_SESSION_SECRET
+      - TZ=Asia/Tokyo
+      - GIN_MODE=release
+    depends_on:
+      mysql-newapi:
+        condition: service_healthy
+      redis-newapi:
+        condition: service_healthy
+    networks:
+      - voapi-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider --tries=1 --timeout=10 http://localhost:3000/api/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+  
+  # --- NewAPI 数据库 (已激活) ---
+  mysql-newapi:
+    image: mysql:8.0
+    container_name: newapi-mysql
+    restart: unless-stopped
+    volumes:
+      - newapi_mysql_data:/var/lib/mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=YOUR_NEWAPI_MYSQL_ROOT_PASSWORD
+      - MYSQL_DATABASE=newapi
+      - MYSQL_USER=newapi_user
+      - MYSQL_PASSWORD=YOUR_NEWAPI_USER_PASSWORD
       - TZ=Asia/Tokyo
     command: [--character-set-server=utf8mb4, --collation-server=utf8mb4_unicode_ci]
     networks:
       - voapi-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pYOUR_NEWAPI_MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
+  # --- NewAPI 数据库备份 (已适配) ---
   mysql-backup:
     image: tiredofit/db-backup
-    container_name: voapi-mysql-backup
-    # ... (保持不变)
+    container_name: newapi-mysql-backup
+    restart: unless-stopped
     environment:
       - DB_TYPE=mysql
-      - DB_HOST=mysql
+      - DB_HOST=mysql-newapi # <-- 已更新
       - DB_USER=root
-      - DB_PASS=YOUR_MYSQL_ROOT_PASSWORD
-      - DB_NAME=voapi
+      - DB_PASS=YOUR_NEWAPI_MYSQL_ROOT_PASSWORD # <-- 已更新
+      - DB_NAME=newapi # <-- 已更新
       - BACKUP_TIME=03:00
       - CLEANUP_TIME=168
       - TIMEZONE=Asia/Tokyo
@@ -75,16 +102,15 @@ services:
     volumes:
       - ./backups:/backup
     depends_on:
-      mysql:
+      mysql-newapi: # <-- 已更新
         condition: service_healthy
     networks:
       - voapi-net
 
-
-  redis:
+  # --- NewAPI Redis (已适配) ---
+  redis-newapi:
     image: redis:7-alpine
-    container_name: voapi-redis
-    # ... (保持不变)
+    container_name: newapi-redis
     restart: unless-stopped
     volumes:
       - redis_data:/data
@@ -100,10 +126,48 @@ services:
       - allkeys-lru
     networks:
       - voapi-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "YOUR_REDIS_PASSWORD", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
+  # --- NewAPI Redis 清理 (已适配) ---
+  redis-cleanup:
+    image: redis:7-alpine
+    container_name: newapi-redis-cleanup
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Tokyo
+    command: |
+      sh -c '
+        while true; do
+          echo "Running Redis cleanup job for new-api at $$(date)"
+          KEYS_TO_CHECK=$$(redis-cli -h redis-newapi -a YOUR_REDIS_PASSWORD --scan --pattern "*" | xargs) # <-- 已更新
+          if [ -n "$$KEYS_TO_CHECK" ]; then
+            for key in $$KEYS_TO_CHECK; do
+              TTL=$$(redis-cli -h redis-newapi -a YOUR_REDIS_PASSWORD TTL "$$key") # <-- 已更新
+              if [ "$$TTL" -le 0 ] && [ "$$TTL" -ne -2 ]; then
+                echo "Deleting key '\''$$key'\'' with TTL $$TTL"
+                redis-cli -h redis-newapi -a YOUR_REDIS_PASSWORD DEL "$$key" # <-- 已更新
+              fi
+            done
+          else
+            echo "No keys found to check via SCAN."
+          fi
+          sleep 86400
+        done
+      '
+    depends_on:
+      redis-newapi: # <-- 已更新
+        condition: service_healthy
+    networks:
+      - voapi-net
+
+  # --- Nginx (已适配) ---
   nginx:
     image: nginx:latest
-    container_name: voapi-nginx
+    container_name: newapi-nginx
     restart: unless-stopped
     ports:
       - "80:80"
@@ -117,17 +181,20 @@ services:
       - /var/www/certbot:/var/www/certbot:ro
     environment:
       - TZ=Asia/Tokyo
-    # --- !! 关键修改 !! ---
-    # 将依赖从 voapi 更新为 new-api
     depends_on:
-      - new-api
+      - new-api # <-- 已更新
     networks:
       - voapi-net
-
+    healthcheck:
+      test: ["CMD-SHELL", "nginx -t && curl --fail --silent --insecure https://localhost/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  
+  # --- Watchtower (已适配) ---
   watchtower:
     image: containrrr/watchtower
-    container_name: voapi-watchtower
-    # ... (保持不变)
+    container_name: newapi-watchtower
     restart: unless-stopped
     environment:
       - WATCHTOWER_SCHEDULE=0 0 4 * * *
@@ -136,14 +203,15 @@ services:
       - TZ=Asia/Tokyo
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    command: ["--cleanup", "--debug", "voapi-app", "new-api-app"] # 可选：同时监控新旧服务
+    command: ["--cleanup", "--debug", "new-api-app"] # <-- 已更新
     networks:
       - voapi-net
 
 volumes:
-  mysql_data:
+  mysql_data: # voapi 旧数据卷，保留
   redis_data:
-  new-api-data: # 为 new-api 添加新的数据卷
+  newapi_mysql_data:
+  new_api_data:
 
 networks:
   voapi-net:
