@@ -1,0 +1,222 @@
+# -----------------------------------------------------------------
+# 示例文件: 迁移失败后的恢复 compose 文件 (完整版)
+#
+# 如果 NewAPI 服务在切换后出现问题，可使用此文件快速恢复到迁移前的状态。
+# 关键变化:
+# 1. `new-api` 和 `mysql-newapi` 服务被注释掉。
+# 2. `voapi` 服务被重新激活。
+# 3. 所有子服务 (redis, backup, nginx 等) 的配置恢复到依赖 VoAPI 的状态。
+# -----------------------------------------------------------------
+services:
+  # --- VoAPI 服务 (已恢复) ---
+  voapi:
+    image: voapi/voapi:latest
+    container_name: voapi-app
+    restart: unless-stopped
+    command: --log-dir /app/logs
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./data:/data
+      - ./logs:/app/logs
+    environment:
+      - SQL_DSN=voapi_user:YOUR_VOAPI_USER_PASSWORD@tcp(mysql:3306)/voapi?charset=utf8mb4&parseTime=True&loc=Local
+      - REDIS_CONN_STRING=redis://:YOUR_REDIS_PASSWORD@redis:6379
+      - SESSION_SECRET=YOUR_VOAPI_SESSION_SECRET
+      - TZ=Asia/Tokyo
+      - GIN_MODE=release
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - voapi-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider --tries=1 --timeout=10 http://localhost:3000/api/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
+  
+  # --- VoAPI 数据库 (保持运行) ---
+  mysql:
+    image: mysql:8.0
+    container_name: voapi-mysql
+    restart: unless-stopped
+    ports:
+      - "33066:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=YOUR_MYSQL_ROOT_PASSWORD
+      - MYSQL_DATABASE=voapi
+      - MYSQL_USER=voapi_user
+      - MYSQL_PASSWORD=YOUR_VOAPI_USER_PASSWORD
+      - TZ=Asia/Tokyo
+    command: [--character-set-server=utf8mb4, --collation-server=utf8mb4_unicode_ci]
+    networks:
+      - voapi-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pYOUR_MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1.5G
+        reservations:
+          cpus: '0.75'
+          memory: 768M
+
+  # --- VoAPI 数据库备份 (已恢复) ---
+  mysql-backup:
+    image: tiredofit/db-backup
+    container_name: voapi-mysql-backup
+    restart: unless-stopped
+    environment:
+      - DB_TYPE=mysql
+      - DB_HOST=mysql
+      - DB_USER=root
+      - DB_PASS=YOUR_MYSQL_ROOT_PASSWORD
+      - DB_NAME=voapi
+      - BACKUP_TIME=03:00
+      - CLEANUP_TIME=168
+      - TIMEZONE=Asia/Tokyo
+      - COMPRESSION=gzip
+    volumes:
+      - ./backups:/backup
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - voapi-net
+  
+  # --- VoAPI Redis (保持运行) ---
+  redis:
+    image: redis:7-alpine
+    container_name: voapi-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    environment:
+      - TZ=Asia/Tokyo
+    command:
+      - redis-server
+      - --requirepass
+      - YOUR_REDIS_PASSWORD
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - allkeys-lru
+    networks:
+      - voapi-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "YOUR_REDIS_PASSWORD", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  
+  # --- VoAPI Redis 清理 (已恢复) ---
+  redis-cleanup:
+    image: redis:7-alpine
+    container_name: voapi-redis-cleanup
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Tokyo
+    command: |
+      sh -c '
+        while true; do
+          echo "Running Redis cleanup job for voapi at $$(date)"
+          KEYS_TO_CHECK=$$(redis-cli -h redis -a YOUR_REDIS_PASSWORD --scan --pattern "*" | xargs)
+          if [ -n "$$KEYS_TO_CHECK" ]; then
+            for key in $$KEYS_TO_CHECK; do
+              TTL=$$(redis-cli -h redis -a YOUR_REDIS_PASSWORD TTL "$$key")
+              if [ "$$TTL" -le 0 ] && [ "$$TTL" -ne -2 ]; then
+                echo "Deleting key '\''$$key'\'' with TTL $$TTL"
+                redis-cli -h redis -a YOUR_REDIS_PASSWORD DEL "$$key"
+              fi
+            done
+          else
+            echo "No keys found to check via SCAN."
+          fi
+          sleep 86400
+        done
+      '
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - voapi-net
+
+  # --- Nginx (已恢复) ---
+  nginx:
+    image: nginx:latest
+    container_name: voapi-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+      - ./logs/nginx:/var/log/nginx
+      - ./static/images:/var/www/sucoiapi.com/static/images:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /var/www/certbot:/var/www/certbot:ro
+    environment:
+      - TZ=Asia/Tokyo
+    depends_on:
+      - voapi
+    networks:
+      - voapi-net
+    healthcheck:
+      test: ["CMD-SHELL", "nginx -t && curl --fail --silent --insecure https://localhost/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  
+  # --- Watchtower (已恢复) ---
+  watchtower:
+    image: containrrr/watchtower
+    container_name: voapi-watchtower
+    restart: unless-stopped
+    environment:
+      - WATCHTOWER_SCHEDULE=0 0 4 * * *
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_INCLUDE_STOPPED=false
+      - TZ=Asia/Tokyo
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: ["--cleanup", "--debug", "voapi-app"]
+    networks:
+      - voapi-net
+
+  # --- NewAPI 服务 (已停用) ---
+  # new-api:
+  #   ...
+  
+  # --- NewAPI 数据库 (已停用) ---
+  # mysql-newapi:
+  #   ...
+
+volumes:
+  mysql_data:
+  redis_data:
+  newapi_mysql_data: # 保留数据卷，以备将来再次尝试迁移
+  new_api_data:
+
+networks:
+  voapi-net:
+    driver: bridge
