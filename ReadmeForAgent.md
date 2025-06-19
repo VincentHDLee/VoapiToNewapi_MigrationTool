@@ -29,6 +29,7 @@ Your primary objective is to automate the data migration from a VoAPI instance t
     *   Read content from `BEFORE_EXAMPLE_PATH`.
     *   Overwrite file at `TARGET_COMPOSE_PATH` with this content.
     *   **CRITICAL**: Search `TARGET_COMPOSE_PATH` for all password placeholders (e.g., `YOUR_MYSQL_ROOT_PASSWORD`) and replace with known or pre-configured credential values.
+    *   **CRITICAL**: Ensure all external ports defined in `TARGET_COMPOSE_PATH` are free on the host machine.
     *   From the parent directory (`../`), execute `docker-compose up -d`.
 
 2.  **Populate `.env` Files**:
@@ -41,7 +42,7 @@ Your primary objective is to automate the data migration from a VoAPI instance t
 Execute migration scripts:
 1.  `python migration_scripts/01_export_voapi_data.py`
 2.  `python migration_scripts/02_transform_and_import_data.py`
-Confirm both scripts complete without errors. If an error occurs, proceed to **Recovery Plan**.
+Confirm both scripts complete without errors. If an error occurs, analyze the error. The database schema should initialize automatically. If tables are missing, it indicates a problem with the volume mount in `docker-compose.yml`.
 
 ### 4. Service Switch
 

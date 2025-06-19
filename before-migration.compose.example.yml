@@ -245,6 +245,7 @@ services:
 #      - "33067:3306" # <-- 暴露给迁移工具的目标端口
 #    volumes:
 #      - newapi_mysql_data:/var/lib/mysql
+#      - ../schemas/newapi_schema.sql:/docker-entrypoint-initdb.d/init.sql # <-- 自动初始化数据库
 #    environment:
 #      - MYSQL_ROOT_PASSWORD=YOUR_NEWAPI_MYSQL_ROOT_PASSWORD
 #      - MYSQL_DATABASE=newapi
